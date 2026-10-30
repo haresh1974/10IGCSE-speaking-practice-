@@ -583,7 +583,7 @@ function ujState(p) {
   if (!state.uj[p.id]) state.uj[p.id] = { base: shuffleIdx(p.sents.length), ans: [], result: [], checked: false, solved: false, revealed: false, best: 0, tries: 0, en: false };
   return state.uj[p.id];
 }
-function ujCard(p) {
+function ujCard(p, cb) {
   var u = ujState(p), n = p.sents.length, box = E('section', { class: 'card' });
   function body(i) { return [E('span', { lang: 'fr' }, plainFr(p.sents[i][0])), u.en ? E('span', { class: 'en' }, p.sents[i][1]) : null]; }
   function paint() {
@@ -623,6 +623,7 @@ function ujCard(p) {
       (u.checked && !locked) ? E('button', { class: 'btn ghost', type: 'button', onclick: function () { u.ans = p.sents.map(function (_, i) { return i; }); u.revealed = true; paint(); } }, 'Show the solution') : null,
       locked ? E('button', { class: 'btn ghost', type: 'button', onclick: function () { u.base = shuffleIdx(n); u.ans = []; u.result = []; u.checked = false; u.solved = false; u.revealed = false; paint(); } }, 'Try again') : null));
     box.append(E('p', { class: 'fb ' + cls, 'aria-live': 'polite' }, msg));
+    if (cb) cb();
   }
   function mv(pos, d) {
     var t = pos + d; if (t < 0 || t >= u.ans.length) return;
@@ -640,11 +641,32 @@ function ujCard(p) {
 function plainFr(str) { return str.replace(/[{}]/g, ''); }
 
 function drawPractice(main, p, ti) {
-  main.append(E('p', { class: 'instr' }, 'Step 1: press Play and read along. The sentence you hear lights up. Pause whenever you need, and tap any sentence to hear it again. The English is under each sentence. Step 2: unjumble the answer below.'));
-  main.append(E('p', { class: 'legend' }, 'Orange underlined words are the complex structures. The label under a sentence names them: comparatif, superlatif, négation, COD, COI, y, en, après avoir / après être, avant de + infinitif, idiome.'));
+  state.stage = state.stage || {};
+  var stage = state.stage[p.id] || 'read';
+  var last = ti === D.practice.length - 1;
+  var nextLabel = last ? 'Go to the speaking test' : 'Next: ' + D.practice[ti + 1].num;
+  if (stage === 'read') main.append(E('p', { class: 'instr' }, 'Step 1: press Play and read along. The sentence you hear lights up. Pause whenever you need, and tap any sentence to hear it again. The English is under each sentence. When you are ready, press “I am ready: unjumble the answer”. The text will then be hidden.'));
+  if (stage === 'read') main.append(E('p', { class: 'legend' }, 'Orange underlined words are the complex structures. The label under a sentence names them: comparatif, superlatif, négation, COD, COI, y, en, après avoir / après être, avant de + infinitif, idiome.'));
   var head = E('div', { class: 'qhead' }, E('span', { class: 'qnum' }, p.num),
     [].concat.apply([], p.qFr.map(function (f, i) { return [E('p', { class: 'qfr', lang: 'fr' }, f), E('p', { class: 'qen' }, p.qEn[i])]; })));
   if (p.altFr.length && p.altFr[0]) head.append(E('p', { class: 'alt' }, 'Other way to ask: ', E('span', { lang: 'fr' }, p.altFr.filter(Boolean).join(' ')), ' (' + p.altEn.filter(Boolean).join(' ') + ')'));
+  if (stage === 'jumble') {
+    var uj = ujState(p);
+    main.append(E('p', { class: 'instr' }, 'Step 2: unjumble the answer. The text is hidden now: remember what you heard and put the sentences back in the right order.'));
+    main.append(E('section', { class: 'card' }, head));
+    var nxt = E('button', { class: 'btn', type: 'button', disabled: true, onclick: function () { goTab(ti + 1); } }, nextLabel);
+    var note = E('span', { class: 'small' });
+    var sync = function () {
+      var ok = uj.solved || uj.revealed;
+      nxt.disabled = !ok;
+      note.textContent = ok ? '' : 'Put every sentence in order to go on, or press “Show the solution” after checking.';
+    };
+    main.append(ujCard(p, sync));
+    main.append(E('div', { class: 'actions' }, nxt,
+      E('button', { class: 'btn ghost', type: 'button', onclick: function () { state.stage[p.id] = 'read'; draw(); window.scrollTo(0, 0); } }, 'Listen and read again'), note));
+    sync(); pa.ui = null;
+    return;
+  }
   var play = E('button', { class: 'btn', type: 'button', onclick: paToggle }, 'Play');
   var prev = E('button', { class: 'btn ghost', type: 'button', onclick: function () { paStep(-1); } }, 'Back');
   var next = E('button', { class: 'btn ghost', type: 'button', onclick: function () { paStep(1); } }, 'Next sentence');
@@ -661,12 +683,11 @@ function drawPractice(main, p, ti) {
     E('div', { class: 'player' }, play, prev, next, rep, slow, hide, status),
     E('div', { class: 'rows' + (state.hideEn ? ' hideen' : ''), id: 'rows' }, rows));
   main.append(card);
-  main.append(ujCard(p));
   pa.p = p; pa.speed = 'n'; pa.idx = -1;
   pa.ui = { play: play, slow: slow, rows: rows, status: status };
-  var last = ti === D.practice.length - 1;
   main.append(E('div', { class: 'actions' },
-    E('button', { class: 'btn', type: 'button', onclick: function () { goTab(ti + 1); } }, last ? 'Go to the speaking test' : 'Next: ' + D.practice[ti + 1].num)));
+    E('button', { class: 'btn', type: 'button', onclick: function () { paStop(); state.stage[p.id] = 'jumble'; draw(); window.scrollTo(0, 0); } }, 'I am ready: unjumble the answer'),
+    E('button', { class: 'btn ghost', type: 'button', onclick: function () { goTab(ti + 1); } }, nextLabel)));
   paUi();
 }
 
