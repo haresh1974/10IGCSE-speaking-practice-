@@ -705,6 +705,7 @@ function beginPrompt() {
 }
 function playPrompt(src) {
   if (T.pEl) { try { T.pEl.pause(); } catch (e) { /* ignore */ } T.pEl = null; }
+  T.qSrc = src;
   var a = new Audio(src); T.pEl = a;
   var started = false;
   function go() { if (T.pEl === a && !started) { started = true; T.pEl = null; startTurn(); } }
@@ -725,21 +726,14 @@ function startTurn() {
   if (T.turn) {
     /* the question was asked again: the same answer carries on, the clock does not restart */
     T.turn.last = now;
-    if (T.turn.rec && T.turn.rec.state === 'paused') { try { T.turn.rec.resume(); } catch (e) { /* ignore */ } }
+    startSeg(T.turn);
     draw();
     cancelAnimationFrame(T.raf); T.raf = requestAnimationFrame(turnTick);
     return;
   }
-  var turn = { t0: now, last: now, voiced: 0, wall: 0, lastAbove: -1e9, rec: null, chunks: [], mime: '' };
+  var turn = { t0: now, last: now, voiced: 0, wall: 0, lastAbove: -1e9, rec: null, cur: null, segs: [], mime: '' };
   T.turn = turn;
-  if (T.mode === 'mic' && T.stream) {
-    try {
-      turn.mime = pickMime();
-      turn.rec = turn.mime ? new MediaRecorder(T.stream, { mimeType: turn.mime }) : new MediaRecorder(T.stream);
-      turn.rec.addEventListener('dataavailable', function (e) { if (e.data && e.data.size) turn.chunks.push(e.data); });
-      turn.rec.start(1000);
-    } catch (e) { turn.rec = null; }
-  }
+  startSeg(turn);
   draw();
   cancelAnimationFrame(T.raf); T.raf = requestAnimationFrame(turnTick);
 }
@@ -764,12 +758,31 @@ function turnTick() {
   if (T.cur && T.cur.q === 'x' && total >= GOAL) { finishTurn(); return; }
   T.raf = requestAnimationFrame(turnTick);
 }
-function stopRec(turn) {
+function startSeg(turn) {
+  if (T.mode !== 'mic' || !T.stream) return;
+  try {
+    if (!turn.mime) turn.mime = pickMime();
+    var seg = { q: T.qSrc || '', blob: null, chunks: [] };
+    var rec = turn.mime ? new MediaRecorder(T.stream, { mimeType: turn.mime }) : new MediaRecorder(T.stream);
+    rec.addEventListener('dataavailable', function (e) { if (e.data && e.data.size) seg.chunks.push(e.data); });
+    rec.addEventListener('stop', function () { if (seg.chunks.length) seg.blob = new Blob(seg.chunks, { type: turn.mime || 'audio/webm' }); seg.done = true; if (seg.onDone) seg.onDone(); });
+    rec.start(1000);
+    seg.rec = rec; turn.rec = rec; turn.cur = seg; turn.segs.push(seg);
+  } catch (e) { turn.rec = null; }
+}
+function stopSeg(turn) {
   return new Promise(function (res) {
-    if (!turn.rec || turn.rec.state === 'inactive') { res(null); return; }
-    turn.rec.addEventListener('stop', function () { res(turn.chunks.length ? new Blob(turn.chunks, { type: turn.mime || 'audio/webm' }) : null); }, { once: true });
-    try { turn.rec.stop(); } catch (e) { res(null); }
+    var seg = turn && turn.cur;
+    if (!seg || seg.done || !seg.rec || seg.rec.state === 'inactive') { res(); return; }
+    seg.onDone = res;
+    try { seg.rec.stop(); } catch (e) { res(); }
   });
+}
+async function stopRec(turn) {
+  await stopSeg(turn);
+  var first = null;
+  turn.segs.forEach(function (s) { if (!first && s.blob) first = s.blob; });
+  return first;
 }
 async function finishTurn() {
   if (T.state !== 'answering') return;
@@ -777,7 +790,7 @@ async function finishTurn() {
   cancelAnimationFrame(T.raf);
   var turn = T.turn, blob = await stopRec(turn);
   var total = turn.wall;
-  T.results.push({ pr: T.cur, voiced: turn.voiced, total: total, blob: blob, url: blob ? URL.createObjectURL(blob) : '', mime: turn.mime });
+  T.results.push({ pr: T.cur, voiced: turn.voiced, total: total, blob: blob, segs: turn.segs, url: '', mime: turn.mime });
   T.sum += turn.voiced;
   T.i++;
   if (T.i < T.order.length) { beginPrompt(); return; }
@@ -794,7 +807,7 @@ function replayPrompt(useAlt) {
   T.state = 'asking';
   cancelAnimationFrame(T.raf);
   var turn = T.turn;
-  if (turn && turn.rec && turn.rec.state === 'recording') { try { turn.rec.pause(); } catch (e) { /* keeps recording */ } }
+  stopSeg(turn);
   if (useAlt) T.altUsed = true;
   else if (T.altUsed) T.rep.a++; else T.rep.o++;
   draw();
@@ -946,13 +959,52 @@ async function blobToMp3(blob) {
   var e = enc.flush(); if (e.length) out.push(new Uint8Array(e));
   return new Blob(out, { type: 'audio/mpeg' });
 }
+
+/* ---- question + answer in one recording ---- */
+var qCache = {};
+async function pcm24k(buf) {
+  var AC = window.AudioContext || window.webkitAudioContext, ac = new AC();
+  var audio = await new Promise(function (res, rej) { var p = ac.decodeAudioData(buf, res, rej); if (p && p.then) p.then(res, rej); });
+  try { ac.close(); } catch (e) { /* ignore */ }
+  var RATE = 24000, OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  var off = new OAC(1, Math.max(1, Math.ceil(audio.duration * RATE)), RATE);
+  var s = off.createBufferSource(); s.buffer = audio; s.connect(off.destination); s.start(0);
+  var rendered = await new Promise(function (res, rej) { var p = off.startRendering(res); if (p && p.then) p.then(res, rej); });
+  return rendered.getChannelData(0);
+}
+async function qPcm(src) {
+  if (!qCache[src]) { var b = await (await fetch(src)).arrayBuffer(); qCache[src] = await pcm24k(b); }
+  return qCache[src];
+}
+async function resultMp3(r) {
+  var RATE = 24000, parts = [], n = 0;
+  function add(f) { parts.push(f); n += f.length; }
+  function gap(sec) { add(new Float32Array(Math.round(sec * RATE))); }
+  for (var i = 0; i < r.segs.length; i++) {
+    var sg = r.segs[i];
+    if (sg.q) { try { add(await qPcm(sg.q)); gap(0.4); } catch (e) { /* question audio skipped */ } }
+    if (sg.blob) { add(await pcm24k(await sg.blob.arrayBuffer())); gap(0.7); }
+    await yieldUi();
+  }
+  var all = new Float32Array(n), o = 0;
+  parts.forEach(function (p) { all.set(p, o); o += p.length; });
+  var pcm = new Int16Array(all.length);
+  for (var k = 0; k < all.length; k++) { var v = Math.max(-1, Math.min(1, all[k])); pcm[k] = v < 0 ? v * 32768 : v * 32767; }
+  var enc = new lamejs.Mp3Encoder(1, RATE, 64), out = [], step = 1152 * 10;
+  for (var j = 0; j < pcm.length; j += step) {
+    var b2 = enc.encodeBuffer(pcm.subarray(j, j + step)); if (b2.length) out.push(new Uint8Array(b2));
+    if ((j / step) % 20 === 19) await yieldUi();
+  }
+  var e2 = enc.flush(); if (e2.length) out.push(new Uint8Array(e2));
+  return new Blob(out, { type: 'audio/mpeg' });
+}
 async function prepareMp3() {
   var list = T.results.filter(function (r) { return r.blob; });
-  if (T.mode !== 'mic' || !list.length || typeof lamejs === 'undefined') { T.mp3 = { ready: true, done: 0, total: 0, all: null, allUrl: '' }; return; }
+  if (T.mode !== 'mic' || !list.length || typeof lamejs === 'undefined') { list.forEach(function (r) { r.url = URL.createObjectURL(r.blob); }); T.mp3 = { ready: true, done: 0, total: 0, all: null, allUrl: '' }; return; }
   var st = T.mp3 = { ready: false, done: 0, total: list.length, all: null, allUrl: '' };
   for (var i = 0; i < list.length; i++) {
     if (T.mp3 !== st) return;
-    try { var m = await blobToMp3(list[i].blob); list[i].mp3 = m; list[i].mp3url = URL.createObjectURL(m); } catch (e) { list[i].mp3 = null; }
+    try { var m = await resultMp3(list[i]); list[i].mp3 = m; list[i].mp3url = URL.createObjectURL(m); list[i].url = list[i].mp3url; } catch (e) { list[i].mp3 = null; list[i].url = URL.createObjectURL(list[i].blob); }
     st.done++;
     var el = document.getElementById('mp3-status'); if (el) el.textContent = 'Preparing your MP3… ' + st.done + ' of ' + st.total;
     await yieldUi();
@@ -968,7 +1020,7 @@ function mp3Card() {
   var st = T.mp3, card = E('section', { class: 'card' }, E('h3', {}, 'Your recording (MP3)'));
   if (!st || !st.ready) { card.append(E('p', { class: 'small', id: 'mp3-status', 'aria-live': 'polite' }, 'Preparing your MP3…' + (st ? ' ' + st.done + ' of ' + st.total : ''))); return card; }
   if (!st.all) { card.append(E('p', { class: 'small' }, 'The MP3 could not be made on this device. You can still play each answer below.')); return card; }
-  card.append(E('p', { class: 'small' }, 'All your answers in one MP3 file, in the order of the test.'));
+  card.append(E('p', { class: 'small' }, 'The questions and all your answers in one MP3 file, in the order of the test.'));
   card.append(E('div', { class: 'actions' }, saveLink(st.allUrl, dlName('speaking_test'), 'Download my recording (MP3)')));
   return card;
 }
