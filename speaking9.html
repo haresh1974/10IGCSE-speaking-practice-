@@ -696,7 +696,7 @@ var T = null;
 function freshTest() {
   return { phase: 'prep', mic: 'idle', micMsg: '', stream: null, ctx: null, an: null, buf: null, floor: 0, thr: 0.01, mode: null,
            convLeft: 2, showText: false, showEn: false,
-           order: [], i: 0, cur: null, state: '', altUsed: false, pEl: null, turn: null, results: [], sum: 0, extraN: 0, hit: false, raf: 0, tickId: 0, rep: { o: 0, a: 0 }, mp3: null };
+           order: [], i: 0, cur: null, state: '', altUsed: false, pEl: null, turn: null, results: [], sum: 0, extraN: 0, hit: false, raf: 0, tickId: 0, rep: { o: 0, a: 0 }, mp3: null, whySeen: {}, capped: false };
 }
 var cv = { el: null, playing: false, raf: 0, idx: -1, ui: null };
 
@@ -836,16 +836,63 @@ function startTurn() {
   if (T.turn) {
     /* the question was asked again: the same answer carries on, the clock does not restart */
     T.turn.last = now;
-    startSeg(T.turn);
+    startSeg(T.turn); T.turn.lastVoice = now; startWhy(T.turn);
     draw();
     cancelAnimationFrame(T.raf); T.raf = requestAnimationFrame(turnTick);
     return;
   }
-  var turn = { t0: now, last: now, voiced: 0, wall: 0, lastAbove: -1e9, rec: null, cur: null, segs: [], mime: '' };
+  var turn = { t0: now, last: now, voiced: 0, wall: 0, lastAbove: -1e9, rec: null, cur: null, segs: [], mime: '', lastVoice: now, why: false, whyProb: false, asr: null, asrOn: false, asrFail: false, asrStop: false, silentEnd: false };
   T.turn = turn;
   startSeg(turn);
+  startWhy(turn);
   draw();
   cancelAnimationFrame(T.raf); T.raf = requestAnimationFrame(turnTick);
+}
+
+/* ---- 4:20 cap, silence guard, reason (Pourquoi) sensing ---- */
+var CAP = 260, SIL_WARN = 10000, SIL_STOP = 20000;
+var WHYRE = /parce\s*qu|\bcar\b|puisque|à cause|c['’]est pour|pour que|grâce à/i;
+var IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+function isWhyPr(p) { return !!p && /pourquoi/i.test(p.fr || ''); }
+function whyNeeded() {
+  var c = T.cur; if (!c || c.q === 'x') return false;
+  if (isWhyPr(c)) return true;
+  var nx = T.order[T.i + 1]; return !!(nx && nx.q === c.q && isWhyPr(nx));
+}
+function startWhy(turn) {
+  if (T.mode !== 'mic' || IOS || !turn || turn.asrFail) return;
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition; if (!SR) return;
+  try {
+    var r = new SR(); r.lang = 'fr-FR'; r.continuous = true; r.interimResults = true;
+    r.onresult = function (e) { var t = ''; for (var i = 0; i < e.results.length; i++) t += e.results[i][0].transcript + ' '; turn.heard = t; if (WHYRE.test(t)) turn.why = true; };
+    r.onerror = function (e) { if (e && /not-allowed|service-not-allowed|audio-capture/.test(e.error || '')) turn.asrFail = true; };
+    r.onend = function () { if (!turn.asrStop && !turn.asrFail && T.turn === turn && T.state === 'answering') { try { r.start(); } catch (x) { /* ignore */ } } };
+    turn.asrStop = false; turn.asr = r; r.start(); turn.asrOn = true;
+  } catch (e) { turn.asr = null; turn.asrFail = true; }
+}
+function stopWhy(turn) { if (turn && turn.asr) { turn.asrStop = true; try { turn.asr.stop(); } catch (e) { /* ignore */ } turn.asr = null; } }
+function whyLive() {
+  return E('p', { class: 'notice', id: 'why-live', role: 'status', style: 'display:none' }, '');
+}
+function whyTick(turn, now) {
+  var el = document.getElementById('why-live'); if (!el) return;
+  var msg = '', ok = false;
+  if (T.mode === 'mic' && now - turn.lastVoice > SIL_WARN) msg = 'I cannot hear you. Please speak, or press « I have finished ». The recording will stop soon if there is no answer.';
+  else if (whyNeeded()) {
+    if (!turn.why && !turn.asrOn && isWhyPr(T.cur) && turn.voiced >= 6) turn.whyProb = true;
+    if (turn.why) { msg = '✓ Reason heard. Well done!'; ok = true; T.whySeen[T.cur.q] = true; }
+    else if (turn.whyProb) { msg = '✓ Reason probably given. Well done!'; ok = true; }
+    else if (isWhyPr(T.cur) && T.whySeen[T.cur.q]) { msg = '✓ You already gave a reason earlier. Add one more detail.'; ok = true; }
+    else if (isWhyPr(T.cur) && turn.voiced > 8) msg = 'Do not forget to say why: « Parce que… » or « Car… ».';
+  }
+  if (msg) { el.textContent = msg; el.style.display = ''; el.style.borderColor = ok ? '#2e7d32' : ''; } else el.style.display = 'none';
+}
+function whyLabel(r) {
+  var s = '';
+  if (r.silent) s += ' · no answer heard';
+  if (r.why) s += ' · reason heard ✓';
+  else if (isWhyPr(r.pr)) s += r.whyProb ? ' · reason probably given' : (r.whyEarly ? ' · reason given earlier' : ' · reason not heard');
+  return s;
 }
 function turnTick() {
   var turn = T.turn;
@@ -855,7 +902,7 @@ function turnTick() {
   var lvl = 0;
   if (T.mode === 'mic') {
     lvl = rms();
-    if (lvl > T.thr) turn.lastAbove = now;
+    if (lvl > T.thr) { turn.lastAbove = now; turn.lastVoice = now; }
     if (now - turn.lastAbove < 700) turn.voiced += dt / 1000;
   } else turn.voiced += dt / 1000;
   var total = T.sum + turn.voiced;
@@ -863,9 +910,12 @@ function turnTick() {
   if (c1) c1.textContent = fmt(turn.voiced);
   if (c2) c2.textContent = fmt(total);
   if (g) g.style.width = Math.min(100, total / GOAL * 100) + '%';
-  if (total >= GOAL && !T.hit) { T.hit = true; if (gb) gb.classList.add('hit'); var gm = document.getElementById('goal-msg'); if (gm) gm.textContent = '4 minutes reached. Well done!'; }
+  if (total >= GOAL && !T.hit) { T.hit = true; if (gb) gb.classList.add('hit'); var gm = document.getElementById('goal-msg'); if (gm) gm.textContent = '4 minutes reached. Well done! The recording stops at 4:20.'; }
   if (T.mode === 'mic') meter(lvl);
   if (T.cur && T.cur.q === 'x' && total >= GOAL) { finishTurn(); return; }
+  if (total >= CAP) { T.capped = true; finishTurn(); return; }
+  if (T.mode === 'mic' && now - turn.lastVoice > SIL_STOP) { turn.silentEnd = true; finishTurn(); return; }
+  whyTick(turn, now);
   T.raf = requestAnimationFrame(turnTick);
 }
 function startSeg(turn) {
@@ -898,11 +948,13 @@ async function finishTurn() {
   if (T.state !== 'answering') return;
   T.state = 'saving';
   cancelAnimationFrame(T.raf);
-  var turn = T.turn, blob = await stopRec(turn);
+  var turn = T.turn; stopWhy(turn); var wr = whyNeeded(), wearly = !!T.whySeen[T.cur.q], blob = await stopRec(turn);
   var total = turn.wall;
-  T.results.push({ pr: T.cur, voiced: turn.voiced, total: total, blob: blob, segs: turn.segs, url: '', mime: turn.mime });
+  T.results.push({ pr: T.cur, voiced: turn.voiced, total: total, blob: blob, segs: turn.segs, url: '', mime: turn.mime, why: turn.why, whyProb: turn.whyProb, whyReq: wr, whyEarly: wearly, silent: turn.silentEnd && turn.voiced < 1.5 });
+  if (turn.why) T.whySeen[T.cur.q] = true;
   T.sum += turn.voiced;
   T.i++;
+  if (T.capped || T.sum >= CAP) { T.capped = true; endTest(); return; }
   if (T.i < T.order.length) { beginPrompt(); return; }
   if (T.sum < GOAL && T.extraN < D.extras.length) { askMore(); return; }
   endTest();
@@ -917,7 +969,7 @@ function replayPrompt(useAlt) {
   T.state = 'asking';
   cancelAnimationFrame(T.raf);
   var turn = T.turn;
-  stopSeg(turn);
+  stopSeg(turn); stopWhy(turn);
   if (useAlt) T.altUsed = true;
   else if (T.altUsed) T.rep.a++; else T.rep.o++;
   draw();
@@ -1014,7 +1066,7 @@ function clocksBlock() {
       E('div', { class: 'clock' }, E('span', { class: 'lbl' }, 'Total speaking time'), E('span', { class: 'val', id: 'clk-sum' }, fmt(tot))),
       E('div', { class: 'clock' }, E('span', { class: 'lbl' }, 'Goal'), E('span', { class: 'val' }, fmt(GOAL)))),
     E('div', { class: 'goal' + (T.hit ? ' hit' : ''), id: 'goal' }, E('i', { id: 'goal-fill', style: 'width:' + Math.min(100, tot / GOAL * 100) + '%' })),
-    E('p', { class: 'small', id: 'goal-msg' }, T.hit ? '4 minutes reached. Well done!' : 'Keep talking: give reasons, examples and details.'));
+    E('p', { class: 'small', id: 'goal-msg' }, T.hit ? '4 minutes reached. Well done! The recording stops at 4:20.' : 'Keep talking: give reasons, examples and details.'));
 }
 function drawRun(main) {
   var n = T.i + 1;
@@ -1035,7 +1087,7 @@ function drawRun(main) {
   var nx = T.order[T.i + 1];
   var wait = nx && T.cur && nx.q === T.cur.q && nx.part > T.cur.part ? E('p', { class: 'notice', role: 'status' }, 'Wait: the examiner will now ask « ' + nx.fr + ' ». Answer this question first. Give your reasons only after you hear « ' + nx.fr + ' ».') : null;
   var why = T.cur && T.cur.part > 0 && /^Pourquoi/.test(T.cur.fr) ? E('p', { class: 'notice', role: 'status' }, 'Hint: now give your reasons. You can start with « Parce que… », « Car… » or « À mon avis… ».') : null;
-  var card = E('section', { class: 'card' }, promptCard(), wait, why,
+  var card = E('section', { class: 'card' }, promptCard(), wait, why, whyLive(),
     E('div', { class: 'actions' }, E('button', { class: 'toggle', type: 'button', 'aria-pressed': String(T.showEn), onclick: function () { T.showEn = !T.showEn; draw(); } }, T.showEn ? 'Hide English' : 'Show English')));
   if (T.state === 'answering') {
     if (T.mode === 'mic') card.append(E('div', { class: 'meter', 'aria-hidden': 'true' }, E('i', { id: 'meter-fill' })));
@@ -1145,7 +1197,7 @@ function reportText() {
   L.push('Speaking time: ' + fmt(T.sum) + ' of 4:00 (' + (T.sum >= GOAL ? 'goal reached' : 'goal not reached') + ')');
   L.push('');
   if (state.uj) { L.push('Unjumble exercise (best result):'); D.practice.forEach(function (q) { var x = state.uj[q.id]; L.push(q.num + ': ' + (x && x.tries ? x.best + ' of ' + q.sents.length + ' in the right place (' + x.tries + (x.tries === 1 ? ' try)' : ' tries)') : 'not done')); }); L.push(''); }
-  T.results.forEach(function (r, i) { L.push((i + 1) + '. ' + (r.pr.q === 'x' ? 'Extra question' : r.pr.num) + ' - speaking ' + fmt(r.voiced) + ', total ' + fmt(r.total)); });
+  T.results.forEach(function (r, i) { L.push((i + 1) + '. ' + (r.pr.q === 'x' ? 'Extra question' : r.pr.num) + ' - speaking ' + fmt(r.voiced) + ', total ' + fmt(r.total) + whyLabel(r)); });
   return L.join('\n');
 }
 function sendFiles() {
@@ -1182,10 +1234,11 @@ function drawDone(main) {
     E('p', { class: 'fb ' + (hit ? 'good' : 'bad'), style: 'font-size:1.3rem' }, 'You spoke for ' + fmt(vo) + ' of 4:00.'),
     E('div', { class: 'goal' + (hit ? ' hit' : '') }, E('i', { style: 'width:' + Math.min(100, vo / GOAL * 100) + '%' })),
     E('p', {}, hit ? 'You reached 4 minutes. Excellent! Try again with different details to stay fluent.' : 'You did not reach 4 minutes yet. Next time add more: a reason, an example, how you feel, and what you did before or after.'),
+    T.capped ? E('p', { class: 'small' }, 'The recording stopped automatically at 4:20.') : null,
     T.mode === 'timer' ? E('p', { class: 'small' }, 'This test used the timer only, so the time is the time you took on each answer.') : null));
   var rows = T.results.map(function (r, i) {
     var box = E('div', { class: 'ans' },
-      E('div', { class: 'ahead' }, E('b', {}, r.pr.q === 'x' ? 'Extra question' : r.pr.num), E('span', { class: 'small' }, 'Speaking ' + fmt(r.voiced) + ' · Total ' + fmt(r.total))),
+      E('div', { class: 'ahead' }, E('b', {}, r.pr.q === 'x' ? 'Extra question' : r.pr.num), E('span', { class: 'small' }, 'Speaking ' + fmt(r.voiced) + ' · Total ' + fmt(r.total) + whyLabel(r))),
       E('p', { class: 'small', lang: 'fr' }, r.pr.fr));
     if (r.url) {
       box.append(E('audio', { controls: true, src: r.url, preload: 'metadata' }));
