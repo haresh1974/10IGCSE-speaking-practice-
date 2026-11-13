@@ -125,6 +125,22 @@ table.sum { border-collapse: collapse; width: 100%; min-width: 24rem; }
 .cx { color: var(--cx); font-weight: 700; border-bottom: 2px solid var(--cx); }
 .chips { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .15rem; }
 .tagchip { font-size: .72rem; font-weight: 700; padding: .05rem .55rem; border-radius: 999px; background: var(--warn-soft); color: var(--warn); }
+.zone { font-size: .8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-2); }
+.alist { list-style: none; margin: 0; padding: .6rem; display: grid; gap: .5rem; border: 2px dashed var(--line); border-radius: 12px; min-height: 4rem; }
+.alist .empty { color: var(--ink-2); padding: .4rem; }
+.arow { display: grid; grid-template-columns: auto 1fr auto; gap: .5rem; align-items: stretch; }
+.idx { display: grid; place-items: center; width: 1.9rem; font-weight: 700; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.sent { display: grid; gap: .2rem; width: 100%; text-align: left; background: var(--paper); border: 2px solid var(--line); border-radius: 10px; padding: .6rem .8rem; font: inherit; color: var(--ink); cursor: pointer; }
+.sent:hover:not(:disabled) { border-color: var(--blue); }
+.sent:disabled { cursor: default; }
+.sent .en { font-size: .88rem; font-style: italic; color: var(--ink-2); }
+.arow.ok .sent { border-color: var(--good); background: var(--good-soft); }
+.arow.bad .sent { border-color: var(--bad); background: var(--bad-soft); }
+.arow.rev .sent { border-color: var(--blue); background: var(--blue-soft); }
+.mv { display: grid; gap: .25rem; }
+.mvb { width: 2.2rem; min-height: 2rem; border-radius: 8px; border: 2px solid var(--line); background: var(--paper); color: var(--ink); font-weight: 700; cursor: pointer; }
+.mvb:hover { border-color: var(--blue); }
+.pool { display: grid; gap: .5rem; }
 .legend { font-size: .92rem; color: var(--ink-2); max-width: 68ch; }
 </style></head><body>
 
@@ -551,12 +567,106 @@ function paUi() {
   }
 }
 
+/* ---- unjumble ---- */
+function shuffleIdx(n) {
+  var a = [], i, j, t;
+  for (i = 0; i < n; i++) a.push(i);
+  var tries = 0;
+  do {
+    for (i = n - 1; i > 0; i--) { j = Math.floor(Math.random() * (i + 1)); t = a[i]; a[i] = a[j]; a[j] = t; }
+    tries++;
+  } while (n > 1 && tries < 20 && a.every(function (v, k) { return v === k; }));
+  return a;
+}
+function ujState(p) {
+  state.uj = state.uj || {};
+  if (!state.uj[p.id]) state.uj[p.id] = { base: shuffleIdx(p.sents.length), ans: [], result: [], checked: false, solved: false, revealed: false, best: 0, tries: 0, en: false };
+  return state.uj[p.id];
+}
+function ujCard(p, cb) {
+  var u = ujState(p), n = p.sents.length, box = E('section', { class: 'card' });
+  function body(i) { return [E('span', { lang: 'fr' }, plainFr(p.sents[i][0])), u.en ? E('span', { class: 'en' }, p.sents[i][1]) : null]; }
+  function paint() {
+    var pool = u.base.filter(function (i) { return u.ans.indexOf(i) < 0; });
+    var locked = u.solved || u.revealed;
+    box.textContent = '';
+    box.append(E('h3', {}, 'Now unjumble the answer'),
+      E('p', { class: 'small' }, 'The sentences of ' + p.num + ' are mixed up. Tap them one by one to build the answer in the right order, as you heard it. Tap a placed sentence to take it back.'),
+      E('button', { class: 'toggle', type: 'button', 'aria-pressed': String(u.en), style: 'justify-self:start', onclick: function () { u.en = !u.en; paint(); } }, u.en ? 'Hide English' : 'Show English'),
+      E('h3', { class: 'zone' }, 'Your answer'));
+    var list = E('ol', { class: 'alist' });
+    if (!u.ans.length) list.append(E('li', { class: 'empty' }, 'Tap a sentence below to place it here. Begin with the first sentence of the answer.'));
+    u.ans.forEach(function (s, pos) {
+      var st = u.revealed ? 'rev' : (u.checked ? (u.result[pos] ? 'ok' : 'bad') : '');
+      var row = E('li', { class: 'arow ' + st }, E('span', { class: 'idx' }, String(pos + 1)),
+        E('button', { class: 'sent', type: 'button', disabled: locked, onclick: function () { u.ans.splice(pos, 1); u.checked = false; paint(); } }, body(s)));
+      if (!locked) row.append(E('div', { class: 'mv' },
+        E('button', { class: 'mvb', type: 'button', 'aria-label': 'Move up', onclick: function () { mv(pos, -1); } }, '↑'),
+        E('button', { class: 'mvb', type: 'button', 'aria-label': 'Move down', onclick: function () { mv(pos, 1); } }, '↓')));
+      else row.append(E('span'));
+      list.append(row);
+    });
+    box.append(list);
+    if (!locked) {
+      box.append(E('h3', { class: 'zone' }, 'Sentences to place'));
+      var pl = E('div', { class: 'pool' });
+      pool.forEach(function (i) { pl.append(E('button', { class: 'sent', type: 'button', onclick: function () { u.ans.push(i); u.checked = false; paint(); } }, body(i))); });
+      if (!pool.length) pl.append(E('p', { class: 'small' }, 'All sentences are placed. Check your order.'));
+      box.append(pl);
+    }
+    var good = u.result.filter(Boolean).length, msg = '', cls = '';
+    if (u.solved) { msg = 'Perfect! Every sentence is in the right place.'; cls = 'good'; }
+    else if (u.revealed) msg = 'This is the correct order. Read it aloud once.';
+    else if (u.checked) { msg = good + ' of ' + n + ' sentences are in the right place. Move the red ones and check again.'; cls = 'bad'; }
+    box.append(E('div', { class: 'actions' },
+      E('button', { class: 'btn', type: 'button', disabled: locked || pool.length > 0, onclick: check }, 'Check my order'),
+      (u.checked && !locked) ? E('button', { class: 'btn ghost', type: 'button', onclick: function () { u.ans = p.sents.map(function (_, i) { return i; }); u.revealed = true; paint(); } }, 'Show the solution') : null,
+      locked ? E('button', { class: 'btn ghost', type: 'button', onclick: function () { u.base = shuffleIdx(n); u.ans = []; u.result = []; u.checked = false; u.solved = false; u.revealed = false; paint(); } }, 'Try again') : null));
+    box.append(E('p', { class: 'fb ' + cls, 'aria-live': 'polite' }, msg));
+    if (cb) cb();
+  }
+  function mv(pos, d) {
+    var t = pos + d; if (t < 0 || t >= u.ans.length) return;
+    var x = u.ans[pos]; u.ans[pos] = u.ans[t]; u.ans[t] = x; u.checked = false; paint();
+  }
+  function check() {
+    u.result = u.ans.map(function (s, k) { return s === k; });
+    var right = u.result.filter(Boolean).length;
+    u.checked = true; u.tries++; u.best = Math.max(u.best, right); u.solved = right === n && u.ans.length === n;
+    paint();
+  }
+  paint();
+  return box;
+}
+function plainFr(str) { return str.replace(/[{}]/g, ''); }
+
 function drawPractice(main, p, ti) {
-  main.append(E('p', { class: 'instr' }, 'Press Play and read along. The sentence you hear lights up. Pause whenever you need, and tap any sentence to hear it again. The English is under each sentence.'));
-  main.append(E('p', { class: 'legend' }, 'Orange underlined words are the complex structures. The label under a sentence names them: comparatif, superlatif, négation, COD, COI, y, en, après avoir / après être, avant de + infinitif, idiome.'));
+  state.stage = state.stage || {};
+  var stage = state.stage[p.id] || 'read';
+  var last = ti === D.practice.length - 1;
+  var nextLabel = last ? 'Go to the speaking test' : 'Next: ' + D.practice[ti + 1].num;
+  if (stage === 'read') main.append(E('p', { class: 'instr' }, 'Step 1: press Play and read along. The sentence you hear lights up. Pause whenever you need, and tap any sentence to hear it again. The English is under each sentence. When you are ready, press “I am ready: unjumble the answer”. The text will then be hidden.'));
+  if (stage === 'read') main.append(E('p', { class: 'legend' }, 'Orange underlined words are the complex structures. The label under a sentence names them: comparatif, superlatif, négation, COD, COI, y, en, après avoir / après être, avant de + infinitif, idiome.'));
   var head = E('div', { class: 'qhead' }, E('span', { class: 'qnum' }, p.num),
     [].concat.apply([], p.qFr.map(function (f, i) { return [E('p', { class: 'qfr', lang: 'fr' }, f), E('p', { class: 'qen' }, p.qEn[i])]; })));
   if (p.altFr.length && p.altFr[0]) head.append(E('p', { class: 'alt' }, 'Other way to ask: ', E('span', { lang: 'fr' }, p.altFr.filter(Boolean).join(' ')), ' (' + p.altEn.filter(Boolean).join(' ') + ')'));
+  if (stage === 'jumble') {
+    var uj = ujState(p);
+    main.append(E('p', { class: 'instr' }, 'Step 2: unjumble the answer. The text is hidden now: remember what you heard and put the sentences back in the right order.'));
+    main.append(E('section', { class: 'card' }, head));
+    var nxt = E('button', { class: 'btn', type: 'button', disabled: true, onclick: function () { goTab(ti + 1); } }, nextLabel);
+    var note = E('span', { class: 'small' });
+    var sync = function () {
+      var ok = uj.solved || uj.revealed;
+      nxt.disabled = !ok;
+      note.textContent = ok ? '' : 'Put every sentence in order to go on, or press “Show the solution” after checking.';
+    };
+    main.append(ujCard(p, sync));
+    main.append(E('div', { class: 'actions' }, nxt,
+      E('button', { class: 'btn ghost', type: 'button', onclick: function () { state.stage[p.id] = 'read'; draw(); window.scrollTo(0, 0); } }, 'Listen and read again'), note));
+    sync(); pa.ui = null;
+    return;
+  }
   var play = E('button', { class: 'btn', type: 'button', onclick: paToggle }, 'Play');
   var prev = E('button', { class: 'btn ghost', type: 'button', onclick: function () { paStep(-1); } }, 'Back');
   var next = E('button', { class: 'btn ghost', type: 'button', onclick: function () { paStep(1); } }, 'Next sentence');
@@ -575,9 +685,9 @@ function drawPractice(main, p, ti) {
   main.append(card);
   pa.p = p; pa.speed = 'n'; pa.idx = -1;
   pa.ui = { play: play, slow: slow, rows: rows, status: status };
-  var last = ti === D.practice.length - 1;
   main.append(E('div', { class: 'actions' },
-    E('button', { class: 'btn', type: 'button', onclick: function () { goTab(ti + 1); } }, last ? 'Go to the speaking test' : 'Next: ' + D.practice[ti + 1].num)));
+    E('button', { class: 'btn', type: 'button', onclick: function () { paStop(); state.stage[p.id] = 'jumble'; draw(); window.scrollTo(0, 0); } }, 'I am ready: unjumble the answer'),
+    E('button', { class: 'btn ghost', type: 'button', onclick: function () { goTab(ti + 1); } }, nextLabel)));
   paUi();
 }
 
@@ -586,7 +696,7 @@ var T = null;
 function freshTest() {
   return { phase: 'prep', mic: 'idle', micMsg: '', stream: null, ctx: null, an: null, buf: null, floor: 0, thr: 0.01, mode: null,
            convLeft: 2, showText: false, showEn: false,
-           order: [], i: 0, cur: null, state: '', altUsed: false, pEl: null, turn: null, results: [], sum: 0, extraN: 0, hit: false, raf: 0, tickId: 0, rep: { o: 0, a: 0 }, mp3: null };
+           order: [], i: 0, cur: null, state: '', altUsed: false, pEl: null, turn: null, results: [], sum: 0, extraN: 0, hit: false, raf: 0, tickId: 0, rep: { o: 0, a: 0 }, mp3: null, whySeen: {}, capped: false };
 }
 var cv = { el: null, playing: false, raf: 0, idx: -1, ui: null };
 
@@ -726,16 +836,63 @@ function startTurn() {
   if (T.turn) {
     /* the question was asked again: the same answer carries on, the clock does not restart */
     T.turn.last = now;
-    startSeg(T.turn);
+    startSeg(T.turn); T.turn.lastVoice = now; startWhy(T.turn);
     draw();
     cancelAnimationFrame(T.raf); T.raf = requestAnimationFrame(turnTick);
     return;
   }
-  var turn = { t0: now, last: now, voiced: 0, wall: 0, lastAbove: -1e9, rec: null, cur: null, segs: [], mime: '' };
+  var turn = { t0: now, last: now, voiced: 0, wall: 0, lastAbove: -1e9, rec: null, cur: null, segs: [], mime: '', lastVoice: now, why: false, whyProb: false, asr: null, asrOn: false, asrFail: false, asrStop: false, silentEnd: false };
   T.turn = turn;
   startSeg(turn);
+  startWhy(turn);
   draw();
   cancelAnimationFrame(T.raf); T.raf = requestAnimationFrame(turnTick);
+}
+
+/* ---- 4:20 cap, silence guard, reason (Pourquoi) sensing ---- */
+var CAP = 260, SIL_WARN = 10000, SIL_STOP = 20000;
+var WHYRE = /parce\s*qu|\bcar\b|puisque|à cause|c['’]est pour|pour que|grâce à/i;
+var IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+function isWhyPr(p) { return !!p && /pourquoi/i.test(p.fr || ''); }
+function whyNeeded() {
+  var c = T.cur; if (!c || c.q === 'x') return false;
+  if (isWhyPr(c)) return true;
+  var nx = T.order[T.i + 1]; return !!(nx && nx.q === c.q && isWhyPr(nx));
+}
+function startWhy(turn) {
+  if (T.mode !== 'mic' || IOS || !turn || turn.asrFail) return;
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition; if (!SR) return;
+  try {
+    var r = new SR(); r.lang = 'fr-FR'; r.continuous = true; r.interimResults = true;
+    r.onresult = function (e) { var t = ''; for (var i = 0; i < e.results.length; i++) t += e.results[i][0].transcript + ' '; turn.heard = t; if (WHYRE.test(t)) turn.why = true; };
+    r.onerror = function (e) { if (e && /not-allowed|service-not-allowed|audio-capture/.test(e.error || '')) turn.asrFail = true; };
+    r.onend = function () { if (!turn.asrStop && !turn.asrFail && T.turn === turn && T.state === 'answering') { try { r.start(); } catch (x) { /* ignore */ } } };
+    turn.asrStop = false; turn.asr = r; r.start(); turn.asrOn = true;
+  } catch (e) { turn.asr = null; turn.asrFail = true; }
+}
+function stopWhy(turn) { if (turn && turn.asr) { turn.asrStop = true; try { turn.asr.stop(); } catch (e) { /* ignore */ } turn.asr = null; } }
+function whyLive() {
+  return E('p', { class: 'notice', id: 'why-live', role: 'status', style: 'display:none' }, '');
+}
+function whyTick(turn, now) {
+  var el = document.getElementById('why-live'); if (!el) return;
+  var msg = '', ok = false;
+  if (T.mode === 'mic' && now - turn.lastVoice > SIL_WARN) msg = 'I cannot hear you. Please speak, or press « I have finished ». The recording will stop soon if there is no answer.';
+  else if (whyNeeded()) {
+    if (!turn.why && !turn.asrOn && isWhyPr(T.cur) && turn.voiced >= 6) turn.whyProb = true;
+    if (turn.why) { msg = '✓ Reason heard. Well done!'; ok = true; T.whySeen[T.cur.q] = true; }
+    else if (turn.whyProb) { msg = '✓ Reason probably given. Well done!'; ok = true; }
+    else if (isWhyPr(T.cur) && T.whySeen[T.cur.q]) { msg = '✓ You already gave a reason earlier. Add one more detail.'; ok = true; }
+    else if (isWhyPr(T.cur) && turn.voiced > 8) msg = 'Do not forget to say why: « Parce que… » or « Car… ».';
+  }
+  if (msg) { el.textContent = msg; el.style.display = ''; el.style.borderColor = ok ? '#2e7d32' : ''; } else el.style.display = 'none';
+}
+function whyLabel(r) {
+  var s = '';
+  if (r.silent) s += ' · no answer heard';
+  if (r.why) s += ' · reason heard ✓';
+  else if (isWhyPr(r.pr)) s += r.whyProb ? ' · reason probably given' : (r.whyEarly ? ' · reason given earlier' : ' · reason not heard');
+  return s;
 }
 function turnTick() {
   var turn = T.turn;
@@ -745,7 +902,7 @@ function turnTick() {
   var lvl = 0;
   if (T.mode === 'mic') {
     lvl = rms();
-    if (lvl > T.thr) turn.lastAbove = now;
+    if (lvl > T.thr) { turn.lastAbove = now; turn.lastVoice = now; }
     if (now - turn.lastAbove < 700) turn.voiced += dt / 1000;
   } else turn.voiced += dt / 1000;
   var total = T.sum + turn.voiced;
@@ -753,9 +910,12 @@ function turnTick() {
   if (c1) c1.textContent = fmt(turn.voiced);
   if (c2) c2.textContent = fmt(total);
   if (g) g.style.width = Math.min(100, total / GOAL * 100) + '%';
-  if (total >= GOAL && !T.hit) { T.hit = true; if (gb) gb.classList.add('hit'); var gm = document.getElementById('goal-msg'); if (gm) gm.textContent = '4 minutes reached. Well done!'; }
+  if (total >= GOAL && !T.hit) { T.hit = true; if (gb) gb.classList.add('hit'); var gm = document.getElementById('goal-msg'); if (gm) gm.textContent = '4 minutes reached. Well done! The recording stops at 4:20.'; }
   if (T.mode === 'mic') meter(lvl);
   if (T.cur && T.cur.q === 'x' && total >= GOAL) { finishTurn(); return; }
+  if (total >= CAP) { T.capped = true; finishTurn(); return; }
+  if (T.mode === 'mic' && now - turn.lastVoice > SIL_STOP) { turn.silentEnd = true; finishTurn(); return; }
+  whyTick(turn, now);
   T.raf = requestAnimationFrame(turnTick);
 }
 function startSeg(turn) {
@@ -788,11 +948,13 @@ async function finishTurn() {
   if (T.state !== 'answering') return;
   T.state = 'saving';
   cancelAnimationFrame(T.raf);
-  var turn = T.turn, blob = await stopRec(turn);
+  var turn = T.turn; stopWhy(turn); var wr = whyNeeded(), wearly = !!T.whySeen[T.cur.q], blob = await stopRec(turn);
   var total = turn.wall;
-  T.results.push({ pr: T.cur, voiced: turn.voiced, total: total, blob: blob, segs: turn.segs, url: '', mime: turn.mime });
+  T.results.push({ pr: T.cur, voiced: turn.voiced, total: total, blob: blob, segs: turn.segs, url: '', mime: turn.mime, why: turn.why, whyProb: turn.whyProb, whyReq: wr, whyEarly: wearly, silent: turn.silentEnd && turn.voiced < 1.5 });
+  if (turn.why) T.whySeen[T.cur.q] = true;
   T.sum += turn.voiced;
   T.i++;
+  if (T.capped || T.sum >= CAP) { T.capped = true; endTest(); return; }
   if (T.i < T.order.length) { beginPrompt(); return; }
   if (T.sum < GOAL && T.extraN < D.extras.length) { askMore(); return; }
   endTest();
@@ -807,7 +969,7 @@ function replayPrompt(useAlt) {
   T.state = 'asking';
   cancelAnimationFrame(T.raf);
   var turn = T.turn;
-  stopSeg(turn);
+  stopSeg(turn); stopWhy(turn);
   if (useAlt) T.altUsed = true;
   else if (T.altUsed) T.rep.a++; else T.rep.o++;
   draw();
@@ -904,7 +1066,7 @@ function clocksBlock() {
       E('div', { class: 'clock' }, E('span', { class: 'lbl' }, 'Total speaking time'), E('span', { class: 'val', id: 'clk-sum' }, fmt(tot))),
       E('div', { class: 'clock' }, E('span', { class: 'lbl' }, 'Goal'), E('span', { class: 'val' }, fmt(GOAL)))),
     E('div', { class: 'goal' + (T.hit ? ' hit' : ''), id: 'goal' }, E('i', { id: 'goal-fill', style: 'width:' + Math.min(100, tot / GOAL * 100) + '%' })),
-    E('p', { class: 'small', id: 'goal-msg' }, T.hit ? '4 minutes reached. Well done!' : 'Keep talking: give reasons, examples and details.'));
+    E('p', { class: 'small', id: 'goal-msg' }, T.hit ? '4 minutes reached. Well done! The recording stops at 4:20.' : 'Keep talking: give reasons, examples and details.'));
 }
 function drawRun(main) {
   var n = T.i + 1;
@@ -925,7 +1087,7 @@ function drawRun(main) {
   var nx = T.order[T.i + 1];
   var wait = nx && T.cur && nx.q === T.cur.q && nx.part > T.cur.part ? E('p', { class: 'notice', role: 'status' }, 'Wait: the examiner will now ask « ' + nx.fr + ' ». Answer this question first. Give your reasons only after you hear « ' + nx.fr + ' ».') : null;
   var why = T.cur && T.cur.part > 0 && /^Pourquoi/.test(T.cur.fr) ? E('p', { class: 'notice', role: 'status' }, 'Hint: now give your reasons. You can start with « Parce que… », « Car… » or « À mon avis… ».') : null;
-  var card = E('section', { class: 'card' }, promptCard(), wait, why,
+  var card = E('section', { class: 'card' }, promptCard(), wait, why, whyLive(),
     E('div', { class: 'actions' }, E('button', { class: 'toggle', type: 'button', 'aria-pressed': String(T.showEn), onclick: function () { T.showEn = !T.showEn; draw(); } }, T.showEn ? 'Hide English' : 'Show English')));
   if (T.state === 'answering') {
     if (T.mode === 'mic') card.append(E('div', { class: 'meter', 'aria-hidden': 'true' }, E('i', { id: 'meter-fill' })));
@@ -1034,7 +1196,8 @@ function reportText() {
   L.push('Mode: ' + (T.mode === 'mic' ? 'recorded' : 'timer only'));
   L.push('Speaking time: ' + fmt(T.sum) + ' of 4:00 (' + (T.sum >= GOAL ? 'goal reached' : 'goal not reached') + ')');
   L.push('');
-  T.results.forEach(function (r, i) { L.push((i + 1) + '. ' + (r.pr.q === 'x' ? 'Extra question' : r.pr.num) + ' - speaking ' + fmt(r.voiced) + ', total ' + fmt(r.total)); });
+  if (state.uj) { L.push('Unjumble exercise (best result):'); D.practice.forEach(function (q) { var x = state.uj[q.id]; L.push(q.num + ': ' + (x && x.tries ? x.best + ' of ' + q.sents.length + ' in the right place (' + x.tries + (x.tries === 1 ? ' try)' : ' tries)') : 'not done')); }); L.push(''); }
+  T.results.forEach(function (r, i) { L.push((i + 1) + '. ' + (r.pr.q === 'x' ? 'Extra question' : r.pr.num) + ' - speaking ' + fmt(r.voiced) + ', total ' + fmt(r.total) + whyLabel(r)); });
   return L.join('\n');
 }
 function sendFiles() {
@@ -1071,10 +1234,11 @@ function drawDone(main) {
     E('p', { class: 'fb ' + (hit ? 'good' : 'bad'), style: 'font-size:1.3rem' }, 'You spoke for ' + fmt(vo) + ' of 4:00.'),
     E('div', { class: 'goal' + (hit ? ' hit' : '') }, E('i', { style: 'width:' + Math.min(100, vo / GOAL * 100) + '%' })),
     E('p', {}, hit ? 'You reached 4 minutes. Excellent! Try again with different details to stay fluent.' : 'You did not reach 4 minutes yet. Next time add more: a reason, an example, how you feel, and what you did before or after.'),
+    T.capped ? E('p', { class: 'small' }, 'The recording stopped automatically at 4:20.') : null,
     T.mode === 'timer' ? E('p', { class: 'small' }, 'This test used the timer only, so the time is the time you took on each answer.') : null));
   var rows = T.results.map(function (r, i) {
     var box = E('div', { class: 'ans' },
-      E('div', { class: 'ahead' }, E('b', {}, r.pr.q === 'x' ? 'Extra question' : r.pr.num), E('span', { class: 'small' }, 'Speaking ' + fmt(r.voiced) + ' · Total ' + fmt(r.total))),
+      E('div', { class: 'ahead' }, E('b', {}, r.pr.q === 'x' ? 'Extra question' : r.pr.num), E('span', { class: 'small' }, 'Speaking ' + fmt(r.voiced) + ' · Total ' + fmt(r.total) + whyLabel(r))),
       E('p', { class: 'small', lang: 'fr' }, r.pr.fr));
     if (r.url) {
       box.append(E('audio', { controls: true, src: r.url, preload: 'metadata' }));
